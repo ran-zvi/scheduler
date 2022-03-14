@@ -1,0 +1,44 @@
+[Scheduler]
+The scheduler executes tasks on a schedule
+
+[Services]
+
+[Manager]
+Reads the schedules for all the tasks and executes them on the workers
+
+- Read schedules from data source
+- Workers connect to it
+- On startup loads schedules to data source
+
+
+[Worker]
+Executes tasks on a schedule
+
+- Listens for tasks from the manager
+- Executes tasks and report success / failure
+
+
+[Data source]
+Holds management data for the scheduler
+
+- Scheduling data for tasks
+- Task status
+
+
+[Components]
+
+[Task]
+Represents a running task
+
+- Defines how and what to execute, e.g:
+	* Python
+	* Bash
+- Its relation to other tasks:
+	- Before / After
+	- In parallel
+	- On Success / Fail
+
+[Schedule]
+A schedule object that contains tasks and how to schedule them
+
+- Defines a schedule to run a task on 
