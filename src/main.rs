@@ -1,19 +1,21 @@
-use std::thread::{Thread, JoinHandle};
-use std::sync::{Arc, Mutex};
-use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc;
-use std::env;
-use std::io::prelude::*;
-use std::io;
-
 use std::{
+    thread::{Thread, JoinHandle},
+    thread,
+    sync::{Arc, Mutex},
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
+    env,
+    io::prelude::*,
+    io,
     error,
-    fmt
-    };
+    fmt,
+    thread::sleep,
+    time::Duration
+};
 
-use task::Task;
-use message::Message;
-use traits::{ReadObject, WriteObject};
+use task::{Task, TaskState};
+use message::{Message, TaskKind};
+use traits::{ReadObject, WriteObject, SyncRead, SyncWrite};
 use worker::Worker;
 
 mod result;
@@ -22,6 +24,7 @@ mod task;
 mod message;
 mod worker;
 mod traits;
+mod queue;
 
 
 #[derive(Debug)]
@@ -53,16 +56,44 @@ impl WorkerHandle {
     pub fn new(id: usize, mut stream: TcpStream) -> Result<Self, io::Error> {
         match stream.read_object() {
             Some(identity::Identity::Worker) => Ok(WorkerHandle {id, stream}),
-            None => Err(io::ErrorKind::Other.into())
+            _ => Err(io::ErrorKind::Other.into())
         }
     }
 
 
     pub fn is_ready(&mut self) -> bool {
-        self.stream.write_object(Message::IsReady).unwrap();
+        match self.stream.write_object(Message::IsReady) {
+            Ok(_) => println!("Worker {} is ready for tasks", self.id),
+            _ => eprintln!("Failed to write to stream")
+        }
         match self.stream.read_object() { 
             Some(Message::ReadyForTask) => true,
             _ => false
+        }
+    }
+
+    pub fn run_task(&mut self, task: String) -> Result<(), io::Error> {
+        match self.stream.write_object(Message::Task(TaskKind::Run(task))) {
+            Ok(_) => { 
+                println!("Task successfully sent to worker: {}", self.id);
+                Ok(())
+            },
+            Err(err) => return Err(err)
+        }
+    }
+
+    pub fn get_current_task_status(&mut self) -> TaskState {
+        let result: Option<Message> = self.stream.read_object();
+        match result {
+            Some(m) if m == Message::Task(TaskKind::State(TaskState::Running)) => {
+                println!("Worker: {} is still running the task", self.id);
+                TaskState::Running
+            },
+            Some(m) if m == Message::Task(TaskKind::State(TaskState::Succeeded)) => {
+                println!("Worker: {} finished runnning the task", self.id);
+                TaskState::Succeeded
+            },
+            _ => TaskState::Failed
         }
     }
 }
@@ -85,26 +116,50 @@ fn run_manager() -> crate::result::Result<()> {
     print!("[Starting Manager]\n");
 
     let listener = TcpListener::bind("0.0.0.0:3333").unwrap();
-    let mut workers: Vec<WorkerHandle> = vec![];
+    let mut workers: Arc<Mutex<Vec<WorkerHandle>>> = Arc::new(Mutex::new(vec![]));
+    let tasks_: Vec<String> = (1..=5).collect::<Vec<u8>>().iter().map(|_| String::from("sleep 3")).collect();
+    let tasks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(tasks_));
+    
 
-
-    for stream in listener.incoming() {
-        let stream: TcpStream = stream.unwrap().try_clone().unwrap();
-        println!("connection");
-        if let Ok(worker) = WorkerHandle::new(workers.len(), stream) {
-            println!("Worker joined: {}", worker.id);
-            workers.push(worker);
-        }
-
-        for worker in workers.iter_mut() {
-            if worker.is_ready() {
-                println!("Ready for tasks!");
+    let mut conn_workers = Arc::clone(&workers);
+    let mut workers_num = 0;
+    let conn_handle = thread::spawn(move || {
+        for stream in listener.incoming() {
+            let stream: TcpStream = stream.unwrap().try_clone().unwrap();
+            stream.set_nonblocking(true).expect("Failed to set non blocking");
+            let mut workers = conn_workers.lock().unwrap();
+            if let Ok(worker) = WorkerHandle::new(workers.len(), stream) {
+                println!("Worker joined: {}", worker.id);
+                workers.push(worker);
             }
-            else {
-                println!("Task in progress!");
+        }
+    });
+
+    let mut task_workers = Arc::clone(&workers);
+    let mut shared_tasks = Arc::clone(&tasks);
+
+    let task_handle = thread::spawn(move || {
+        loop {
+            let mut tasks = shared_tasks.lock().unwrap();
+            let mut workers = task_workers.lock().unwrap();
+            for worker in workers.iter_mut() {
+                if !tasks.is_empty() && worker.is_ready() {
+                    if let Some(task) = tasks.pop() { 
+                        worker.run_task(task).expect("Failed to send task to worker");
+                        println!("{} tasks left in the queue", tasks.len());
+                    }
+                }
+                else {
+                    let id = worker.id;
+                    println!("Worker - {}: {:?}", id, worker.get_current_task_status());
                 }
             }
         }
+    });
+
+    conn_handle.join();
+    task_handle.join();
+    
     Ok(())
 }
 
@@ -113,7 +168,6 @@ fn run_worker() -> crate::result::Result<()> {
     print!("[Starting Worker]\n");
         
     let mut worker = Worker::new("localhost","3333")?;
-    worker.run()?;
+    Worker::run(&mut worker)?;
     Ok(())
-
 }
